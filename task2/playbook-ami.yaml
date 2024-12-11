@@ -1,0 +1,117 @@
+---
+- name: Create Custom AMI with Apache, Ansible, and Flask
+  hosts: localhost
+  gather_facts: false
+  vars:
+    instance_type: t2.micro
+    region: us-east-1
+    vpc_id: "{{ lookup('env', 'TF_VAR_vpc_id') }}"
+    subnet_id: "{{ lookup('env', 'TF_VAR_subnet_id') }}"
+    security_group_id: "{{ lookup('env', 'TF_VAR_security_group_id') }}"
+    ami_name: "Tele6420-AMI"
+    base_ami: "ami-0453ec754f44f9a4a"
+
+  tasks:
+    - name: Launch EC2 instance
+      amazon.aws.ec2_instance:
+        name: "temp-instance-for-ami"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ base_ami }}"
+        region: "{{ region }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        security_group: "{{ security_group_id }}"
+        network:
+          assign_public_ip: true
+        wait: yes
+        state: present
+        user_data: |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 python3-pip
+          yum groupinstall -y "Development Tools"
+          yum install -y python3-devel
+          pip3 install ansible flask flask-sqlalchemy flask-migrate mysql-connector-python pymysql psutil
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Hello from FINAL PROJECT of TELE6420</h1>" > /var/www/html/index.html
+          echo "RDS_USERNAME=admin" >> /etc/environment
+          echo "RDS_PASSWORD=password123" >> /etc/environment
+          echo "RDS_DBNAME=mydb" >> /etc/environment
+          echo "RDSHOST_NAME=localhost" >> /etc/environment
+          source /etc/environment
+
+          # Create stress.py file in ec2-user's home directory
+          cat << 'EOF' > /home/ec2-user/stress.py
+          import psutil
+          import time
+          import multiprocessing
+          from multiprocessing import Process
+
+          def cpu_load():
+              while True:
+                  x = 1234 * 5678  # Simple calculation to create load
+
+          def monitor():
+              start_time = time.time()
+              while True:
+                  cpu_percent = psutil.cpu_percent(interval=1)
+                  print(f"CPU Usage: {cpu_percent}%")
+
+                  time.sleep(1500)
+                  
+                  if cpu_percent > 90:
+                      print("CPU usage exceeded 90%. Stopping...")
+                      return True
+                      
+                  if time.time() - start_time > 30:
+                      print("30 seconds completed")
+                      return False
+                    
+
+          if __name__ == '__main__':
+              # Start CPU load processes
+              processes = []
+              for _ in range(multiprocessing.cpu_count()):
+                  p = Process(target=cpu_load)
+                  p.start()
+                  processes.append(p)
+              
+              # Monitor CPU usage
+              should_terminate = monitor()
+              
+              # Terminate all processes
+              for p in processes:
+                  p.terminate()
+          EOF
+
+          # Set proper ownership and permissions
+          chown ec2-user:ec2-user /home/ec2-user/stress.py
+          chmod +x /home/ec2-user/stress.py
+      register: ec2
+
+    - name: Wait for user data script to complete
+      pause:
+        minutes: 2
+
+    - name: Create AMI
+      amazon.aws.ec2_ami:
+        instance_id: "{{ ec2.instances[0].instance_id }}"
+        name: "{{ ami_name }}"
+        region: "{{ region }}"
+        wait: yes
+        tags:
+          Name: "{{ ami_name }}"
+          Description: "AMI with Ansible, Apache, and Flask pre-installed"
+      register: ami
+
+    - name: Terminate temporary instance
+      amazon.aws.ec2_instance:
+        instance_ids: "{{ ec2.instances[0].instance_id }}"
+        region: "{{ region }}"
+        state: absent
+        wait: yes
+
+    - name: Output AMI ID
+      debug:
+        msg: "Created AMI with ID: {{ ami.image_id }}"
